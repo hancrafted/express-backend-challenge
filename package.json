@@ -1,7 +1,8 @@
 {
   "scripts": {
     "start": "ts-node src/index.ts",
-    "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts"
+    "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@turf/turf": "^7.1.0",
