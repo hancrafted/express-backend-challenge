@@ -293,3 +293,183 @@ Implement an API endpoint to retrieve the final results of a completed workflow.
 
 ---
 
+### **Design Notes**
+
+These notes capture the design decisions reached during planning,
+organised by Todo. For each decision the alternatives considered are
+summarised so the reviewer can follow the trade-off reasoning without
+opening the PRD. The PRD itself holds the full implementation spec.
+
+#### Cross-cutting
+
+**Test framework — `vitest`.** Chosen over `jest` (heavy dep tree,
+separate `ts-jest` config) and Node's built-in `node:test` (thin
+assertion/mock vocabulary). Vitest runs TypeScript natively, boots in
+~200ms, and its API is jest-identical for reviewer familiarity.
+
+**Implementation strategy — Red–Green–Refactor (TDD), strictly.** Every
+module listed in the PRD's Testing Decisions is written test-first.
+Sequencing: `workflowSummary` aggregation → `PolygonAreaJob` →
+`ReportGenerationJob` → entity / factory changes → `TaskRunner` →
+reconciliation sweep → HTTP routes.
+
+**Crash recovery.** Interdependent tasks introduce two stranded-state
+failure modes on process crash: tasks stuck in `in_progress`, and
+`waiting` tasks whose parents completed but whose `waiting → queued`
+promotion was never written. Closed by (a) a startup reconciliation
+sweep that resets orphaned `in_progress` tasks and promotes `waiting`
+tasks whose dependencies are all `completed`, and (b) wrapping "mark
+parent completed + promote children" in a single TypeORM transaction.
+A full **lease / heartbeat model** (per-task `leasedAt` / `leaseOwner`,
+expired-lease reclaim, job-level idempotency keys) was considered for
+production-grade deployment but rejected as over-engineered for this
+challenge. Jobs are assumed idempotent; duplicate-side-effect prevention
+(e.g. re-sending an email on retry) is out of scope.
+
+---
+
+#### Todo #1 — Polygon Area Job
+
+**Q: Where should task output live?** The starting code writes each
+task's output to a separate `Result` row via `Task.resultId`; the spec
+asks for an `output` field on `Task`.
+- Options: (A) reuse `Result`, (B) migrate fully to `Task.output` and
+  delete `Result`, (C) add `Task.output` alongside `Result` and keep both.
+- **Decision: C.** Take the spec literally; leave `Result` untouched to
+  minimise diff and avoid breaking starter-code callers. Rationalising
+  the two is flagged as a follow-up in the PRD.
+
+**Q: How should invalid GeoJSON be signalled?**
+- Options: (A) throw a descriptive `Error` — `TaskRunner`'s existing
+  catch marks the task `failed`, (B) return a structured `{ok:false}`
+  sentinel and stay `completed`, (C) categorised errors with an
+  `errorKind` column on `Task`.
+- **Decision: A.** Matches the Readme literally ("marks the task as
+  failed"). B would break the fail-fast cascade — children would see the
+  parent as "completed". C is schema churn for information that fits in
+  the error message string.
+
+---
+
+#### Todo #2 — Report Generation Job
+
+No open design questions unique to this Todo — the output contract is
+settled by Todo #1 (`Task.output`), fan-in dependency semantics by
+Todo #3, and failed-task inclusion by Todo #4. `ReportGenerationJob` is
+a thin adapter that reads `context.dependencyOutputs`, shapes the
+Readme-example body, and returns the object. Under fail-fast it never
+runs on the failure path; the workflow-level `finalResult` (Todo #4) is
+the failure-path surface instead.
+
+---
+
+#### Todo #3 — Interdependent Tasks
+
+**Q: YAML and DB form for dependencies.**
+- Options: (A) YAML uses stepNumbers, DB stores resolved parent UUIDs,
+  (B) both YAML and DB use stepNumbers, (C) a separate
+  `task_dependencies` join table.
+- **Decision: B.** Indexes wouldn't help either column form
+  (`Task.dependency` is a JSON array); lookups go child → parents and
+  are satisfied by in-memory iteration over the already-loaded
+  `workflow.tasks` collection. StepNumbers keep the SQLite row directly
+  auditable. C is the production-grade answer but over-plumbing here.
+
+**Q: How does the worker know a task is ready?**
+- Options: (A) keep single `Queued` status, filter readiness in the poll
+  query every tick, (B) add a `Waiting` status and promote `Waiting →
+  Queued` when deps complete, (C) sequential by stepNumber, no fan-in.
+- **Decision: B.** The Readme's Report example is fan-in by nature, so C
+  sacrifices correctness for simplicity. B is cheaper than A at scale
+  (readiness computed on transition, not every 5s poll) and makes
+  "blocked" visible in the DB instead of invisible. A's self-healing
+  property is replicated by the transactional promotion + startup sweep
+  (see Cross-cutting).
+
+**Q: How are dependency outputs passed into a job?**
+- Options: (A) the job reads them from the DB itself, (B) `TaskRunner`
+  passes a typed `JobContext = { dependencyOutputs: Record<stepNumber,
+  unknown> }` second argument, (C) purely in-memory, no DB round-trip.
+- **Decision: B.** Keeps jobs pure (no ORM dependency), keeps
+  `TaskRunner` the single arbiter of task inputs, and survives crashes
+  (context is rebuilt from persisted `Task.output` on restart). Existing
+  jobs that ignore the second argument need only a signature widening.
+
+**Q: Failure cascade semantics.**
+- Options: (A) dependents still run with `undefined` parent output,
+  (B) fail-fast — any failure marks all transitive dependents `failed`
+  without executing, (C) per-task `continueOnFailure` YAML flag.
+- **Decision: B.** Simplest semantics consistent with the Todo wording
+  ("do not execute until dependencies are completed"); keeps jobs free
+  of defensive upstream-state checks. Per-task retry policy, critical-
+  path awareness, and user notification on workflow failure are flagged
+  as production extensions and are out of scope.
+
+---
+
+#### Todo #4 — Final Workflow Results
+
+**Q: Who owns `finalResult`?**
+- Options: (A) computed only when a `ReportGenerationJob` is present,
+  (B) framework-owned — `TaskRunner` snapshots it on any terminal
+  transition, (C) both (user report on success, framework fallback on
+  failure).
+- **Decision: B.** `finalResult` is a framework audit-trail artefact;
+  making it contingent on a user-defined job means failed workflows
+  would have no durable record. A user `ReportGenerationJob`'s output
+  still lives inside `finalResult.tasks[]` as one entry — no loss of
+  information.
+
+**Q: What does `finalResult` look like for a *failed* workflow?**
+- Options: (A) only successful tasks listed, (B) every task listed with
+  its terminal status and either `output` or `error`, including
+  skipped-cascade tasks with `error: "Skipped: dependency <step>
+  failed"`, (C) a flat failure summary only (which step failed, which
+  error).
+- **Decision: B.** Satisfies Todo #4's "include failure information"
+  requirement and makes the `/results` response self-explanatory: a
+  reader can see exactly where a workflow terminated and why. Ordered by
+  `stepNumber` ascending so the narrative reads top-to-bottom.
+
+Together these settle that `workflowSummary` is a **single pure
+aggregation module** consumed by three callers: `TaskRunner` on terminal
+transition, `/workflow/:id/status` (live), and `/workflow/:id/results`
+(parsing `finalResult` back out).
+
+---
+
+#### Todo #5 — Workflow Status Endpoint
+
+**Q: Body schema, and what counts as a "completed" task?**
+- Options: (A) strict Readme literal — four fields only,
+  `completedTasks` = count of `status === completed`, (B) optional
+  `?includeTasks=true` query flag to additionally return a per-task
+  breakdown, (C) always return the full per-task list.
+- **Decision: B.** `completedTasks` counts only tasks with
+  `status === completed` — terminal-failed tasks are not counted, so
+  `completed + failed ≤ totalTasks` may hold legitimately.
+  `?includeTasks=true` opt-in gives clients a detail view without
+  bloating the default polling payload. Body reuses the unified schema
+  from Todo #4 so the two endpoints can never drift.
+
+---
+
+#### Todo #6 — Workflow Results Endpoint
+
+**Q: What is the correct response for a *failed* workflow?** The spec
+says return `400` when the workflow is "not yet completed" — ambiguous
+between "not yet in a terminal state" and "not yet
+`status === completed`".
+- Options: (A) strict literal — `failed` → 400 alongside `in_progress`,
+  (B) terminal → 200 — both `completed` and `failed` workflows return
+  200 with their `finalResult`, only non-terminal states receive 400,
+  (C) different HTTP codes per terminal state (e.g. 200 vs 207).
+- **Decision: B.** Todos #2 and #4 require the system to produce rich
+  failure information; returning 400 on failed (A) would strand exactly
+  that information behind an error code. Read "not yet completed" as
+  "not yet in a terminal state". The response body's `status` field
+  distinguishes success from failure at the application layer. C
+  misuses HTTP status codes (207 is for WebDAV batch responses).
+
+---
+
