@@ -9,23 +9,23 @@ This repository demonstrates a backend architecture that handles asynchronous ta
 
 ## Key Features
 
-1. **Entity Modeling with TypeORM**  
+1. **Entity Modeling with TypeORM**
    - **Task Entity:** Represents an individual unit of work with attributes like `taskType`, `status`, `progress`, and references to a `Workflow`.
    - **Workflow Entity:** Groups multiple tasks into a defined sequence or steps, allowing complex multi-step processes.
 
-2. **Workflow Creation from YAML**  
+2. **Workflow Creation from YAML**
    - Use `WorkflowFactory` to load workflow definitions from a YAML file.
    - Dynamically create workflows and tasks without code changes by updating YAML files.
 
-3. **Asynchronous Task Execution**  
+3. **Asynchronous Task Execution**
    - A background worker (`taskWorker`) continuously polls for `queued` tasks.
    - The `TaskRunner` runs the appropriate job based on a task’s `taskType`.
 
-4. **Robust Status Management**  
+4. **Robust Status Management**
    - `TaskRunner` updates the status of tasks (from `queued` to `in_progress`, `completed`, or `failed`).
    - Workflow status is evaluated after each task completes, ensuring you know when the entire workflow is `completed` or `failed`.
 
-5. **Dependency Injection and Decoupling**  
+5. **Dependency Injection and Decoupling**
    - `TaskRunner` takes in only the `Task` and determines the correct job internally.
    - `TaskRunner` handles task state transitions, leaving the background worker clean and focused on orchestration.
 
@@ -35,12 +35,12 @@ This repository demonstrates a backend architecture that handles asynchronous ta
 src
 ├─ models/
 │   ├─ world_data.json  # Contains world data for analysis
-│   
+│
 ├─ models/
 │   ├─ Result.ts        # Defines the Result entity
 │   ├─ Task.ts          # Defines the Task entity
 │   ├─ Workflow.ts      # Defines the Workflow entity
-│   
+│
 ├─ jobs/
 │   ├─ Job.ts           # Job interface
 │   ├─ JobFactory.ts    # getJobForTaskType function for mapping taskType to a Job
@@ -162,7 +162,7 @@ The following tasks must be completed to enhance the backend system:
 ---
 
 ### **1. Add a New Job to Calculate Polygon Area**
-**Objective:**  
+**Objective:**
 Create a new job class to calculate the area of a polygon from the GeoJSON provided in the task.
 
 #### **Steps:**
@@ -178,7 +178,7 @@ Create a new job class to calculate the area of a polygon from the GeoJSON provi
 ---
 
 ### **2. Add a Job to Generate a Report**
-**Objective:**  
+**Objective:**
 Create a new job class to generate a report by aggregating the outputs of multiple tasks in the workflow.
 
 #### **Steps:**
@@ -204,7 +204,7 @@ Create a new job class to generate a report by aggregating the outputs of multip
 ---
 
 ### **3. Support Interdependent Tasks in Workflows**
-**Objective:**  
+**Objective:**
 Modify the system to support workflows with tasks that depend on the outputs of earlier tasks.
 
 #### **Steps:**
@@ -220,7 +220,7 @@ Modify the system to support workflows with tasks that depend on the outputs of 
 ---
 
 ### **4. Ensure Final Workflow Results Are Properly Saved**
-**Objective:**  
+**Objective:**
 Save the aggregated results of all tasks in the workflow as the `finalResult` field of the `Workflow` entity.
 
 #### **Steps:**
@@ -235,7 +235,7 @@ Save the aggregated results of all tasks in the workflow as the `finalResult` fi
 ---
 
 ### **5. Create an Endpoint for Getting Workflow Status**
-**Objective:**  
+**Objective:**
 Implement an API endpoint to retrieve the current status of a workflow.
 
 #### **Endpoint Specification:**
@@ -258,7 +258,7 @@ Implement an API endpoint to retrieve the current status of a workflow.
 ---
 
 ### **6. Create an Endpoint for Retrieving Workflow Results**
-**Objective:**  
+**Objective:**
 Implement an API endpoint to retrieve the final results of a completed workflow.
 
 #### **Endpoint Specification:**
@@ -473,3 +473,146 @@ between "not yet in a terminal state" and "not yet
 
 ---
 
+
+### **Production Considerations (Considered, Deferred)**
+
+The decisions below list production-grade alternatives that were
+considered during planning and explicitly deferred because they are
+over-scope for this coding challenge. They are recorded here so a
+reviewer can see that the narrower scope is deliberate, not an
+oversight. Full rationale and concrete migration paths live in the
+PRD's design notes; this section is the one-line index.
+
+#### Concurrency & execution
+
+- **Task claim is not race-safe across workers.** Current:
+  `findOne({ status: Queued })`, single worker assumed. Production:
+  atomic claim with `SELECT … FOR UPDATE SKIP LOCKED` on Postgres (or
+  a compare-and-swap `UPDATE` on SQLite) against `lease_owner` /
+  `lease_expires_at` columns on `Task`.
+- **Crash recovery is boot-gated.** Current: startup reconciliation
+  sweep resets stranded `in_progress` / `waiting` rows. Production:
+  continuous lease expiry + heartbeats so mid-run hangs are reclaimed
+  too, not just clean crashes.
+- **Scheduler is edge-triggered only.** Current: `TaskRunner`
+  maintains readiness invariant at transitions. Production: retain
+  edge-triggered for latency and add a periodic level-triggered sweep
+  as a correctness net; optionally `LISTEN/NOTIFY` to replace polling.
+
+#### Dependency graph
+
+- **Dependencies stored as JSON array of stepNumbers.** Current:
+  `Task.dependency: text`. Production: explicit `task_dependencies`
+  join table keyed by UUIDs, with indexes on both sides; enables SQL
+  readiness predicates and scales to large DAGs.
+- **No submit-time validation.** Current: `WorkflowFactory` trusts
+  the YAML. Production: cycle detection, duplicate-step rejection,
+  and reference-integrity checks on `POST /analysis`, returning
+  `400` before anything is persisted.
+
+#### Retry, idempotency, failure policy
+
+- **No retry policy.** Current: fail-fast, one attempt. Production:
+  per-task `retry: { maxAttempts, backoff, initialDelay, maxDelay }`
+  in YAML, plus `attempt_count` / `next_attempt_at` on `Task`.
+- **No dead-letter queue.** Current: terminal `failed` tasks sit in
+  place. Production: separate `dead_letter_tasks` state or table,
+  plus an operator replay endpoint.
+- **No `continueOnFailure` flag.** Current: any failure cascades to
+  all transitive dependents unconditionally. Production: per-task
+  flag lets downstream jobs run with partial inputs (primary use
+  case: best-effort `ReportGenerationJob`).
+- **Job idempotency is assumed, not enforced.** Current: external
+  side-effects (e.g. re-sent emails) may duplicate on retry.
+  Production: `Task.idempotency_key` propagated into external calls
+  as a dedup token.
+
+#### Persistence & schema
+
+- **`dropSchema: true` on every boot.** Current: convenient for
+  iteration. Production: TypeORM migrations, `synchronize: false`,
+  `dropSchema: false`, migration step in the deploy pipeline.
+- **`Task.output` and `Workflow.finalResult` stored as stringified
+  JSON `text`.** Current: SQLite-compatible. Production on Postgres:
+  `jsonb` columns with GIN indexes on queryable paths; removes the
+  app-layer parse/stringify round-trip.
+- **`Task.output` added alongside legacy `Result` entity.** Current:
+  dual-write kept to minimise the diff. Production: consolidate —
+  `Task.output` becomes canonical, `Result` and `Task.resultId`
+  dropped after a backfill migration.
+- **No indexes defined on `tasks`.** Production: at minimum
+  `(status, created_at)`, `(workflow_id)`, and a partial index on
+  `(lease_expires_at) WHERE status='in_progress'` for the reclaimer.
+
+#### HTTP surface
+
+- **No authentication or authorisation.** Current: any caller may
+  read any workflow. Production: JWT bearer auth + `clientId`
+  ownership check on every workflow-scoped endpoint; `404` for
+  existence hiding where the threat model requires it.
+- **No rate limiting.** `GET /workflow/:id/status` is a natural
+  polling target. Production: token-bucket limiter (e.g.
+  `express-rate-limit` + Redis) with tighter limits on write
+  endpoints, `429` + `Retry-After` on breach.
+- **No caching on `/status`.** Current: every poll re-aggregates
+  from the DB. Production: `ETag` + `If-None-Match` → `304`
+  short-circuit, or replace polling with SSE / WebSocket on a
+  `/workflow/:id/stream` endpoint.
+- **No pagination on `?includeTasks=true`.** Production: cursor
+  pagination once task count exceeds a threshold (e.g. 50).
+- **`POST /analysis` is not idempotent.** Production: honour an
+  `Idempotency-Key` request header; repeated submissions return the
+  original workflow rather than creating duplicates.
+- **No API versioning.** Current: `/workflow/:id/status`.
+  Production: `/v1/workflow/:id/status` — cheap forward compatibility.
+- **No per-task detail endpoint.** Production:
+  `GET /v1/workflow/:id/task/:stepNumber` returning attempt history,
+  raw `output` / `error`, and lease state — essential for debugging
+  a failed workflow.
+
+#### Observability
+
+- **No structured logging.** Production: `pino` JSON logs with
+  `workflowId` / `taskId` / `stepNumber` / `taskType` / `attempt` on
+  every line; one log per state transition.
+- **No metrics.** Production: Prometheus (`prom-client`) — counter
+  per `(task_type, terminal_status)`, histogram on task duration,
+  gauge on queue depth per status, exposed at `/metrics`.
+- **No tracing.** Production: OpenTelemetry spans per task execution,
+  parented by a workflow-level span, correlated with the originating
+  `POST /analysis` request span.
+- **No health endpoints.** Production: `GET /healthz` (liveness) and
+  `GET /readyz` (readiness — DB reachable, worker tick fresh).
+
+#### Downstream delivery
+
+- **`finalResult` is pull-only.** Current: clients must poll
+  `/results`. Production: webhook (registered at submit time, signed
+  with HMAC) or pub-sub emission (Kafka / SNS) on any terminal
+  transition; the delivery itself obeys the retry / DLQ policy above.
+
+#### Testing
+
+- **Route handlers untested.** Production: `supertest` coverage of
+  `200` / `400` / `404` on both endpoints, including auth and
+  rate-limit middleware.
+- **Worker loop untested.** Production: at least one integration
+  test that runs the real worker against in-memory SQLite to
+  terminal convergence — catches tick coalescing and restart races
+  that isolated `TaskRunner` tests cannot see.
+- **No fault-injection.** Production: kill-mid-transaction tests
+  asserting DB consistency after `manager.transaction` is
+  interrupted. This is the test that justifies the "transactional
+  promotion + reconciliation" architecture.
+
+#### Scheduler scale ceiling
+
+The hand-rolled scheduler in `TaskRunner` + `taskWorker` is a correct
+choice at this scale. Beyond roughly 10⁴ workflows/day per worker, or
+in any multi-region deployment, migrate to a durable-execution engine
+(**Temporal**, **BullMQ**, or **Inngest**) rather than growing this
+one further. The `Job` / `WorkflowFactory` abstractions map cleanly
+onto Temporal's activity / workflow model; the port is mostly
+deletions.
+
+---
