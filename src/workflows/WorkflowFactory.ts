@@ -15,6 +15,7 @@ export enum WorkflowStatus {
 interface WorkflowStep {
     taskType: string;
     stepNumber: number;
+    dependsOn?: number[];
 }
 
 interface WorkflowDefinition {
@@ -48,10 +49,16 @@ export class WorkflowFactory {
             const task = new Task();
             task.clientId = clientId;
             task.geoJson = geoJson;
-            task.status = TaskStatus.Queued;
             task.taskType = step.taskType;
             task.stepNumber = step.stepNumber;
             task.workflow = savedWorkflow;
+            if (step.dependsOn && step.dependsOn.length > 0) {
+                task.dependency = JSON.stringify(step.dependsOn);
+                task.status = TaskStatus.Waiting;
+            } else {
+                task.dependency = null;
+                task.status = TaskStatus.Queued;
+            }
             return task;
         });
 

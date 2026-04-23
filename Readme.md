@@ -155,6 +155,69 @@ src
     - Once tasks are done, the workflow is marked as `completed`.
 
 
+### **End-to-End Demo — Fan-in Workflow**
+
+The shipped `src/workflows/example_workflow.yml` is a three-step fan-in:
+`polygonArea` and `analysis` run in parallel; `reportGeneration` depends
+on both and runs once they complete. `POST /analysis` drives the full
+pipeline end to end.
+
+1. **Submit a workflow** — returns a `workflowId` (202):
+    ```bash
+    curl -X POST http://localhost:3000/analysis \
+      -H "Content-Type: application/json" \
+      -d '{
+        "clientId": "demo",
+        "geoJson": {
+          "type": "Polygon",
+          "coordinates": [[
+            [-63.624885020050996, -10.311050368263523],
+            [-63.624885020050996, -10.367865108370523],
+            [-63.61278302732815,  -10.367865108370523],
+            [-63.61278302732815,  -10.311050368263523],
+            [-63.624885020050996, -10.311050368263523]
+          ]]
+        }
+      }'
+    # => { "workflowId": "<id>", "message": "Workflow created and tasks queued from YAML definition." }
+    ```
+
+2. **Poll status** — shows `in_progress` while running, `completed`
+   after `reportGeneration` finishes:
+    ```bash
+    curl http://localhost:3000/workflow/<id>/status
+    # => { "workflowId": "<id>", "status": "completed", "completedTasks": 3, "totalTasks": 3 }
+    ```
+
+3. **Per-task breakdown** — opt-in with `?includeTasks=true`:
+    ```bash
+    curl 'http://localhost:3000/workflow/<id>/status?includeTasks=true'
+    # => { …, "tasks": [
+    #      { "stepNumber": 1, "taskType": "polygonArea",     "status": "completed", "output": <area> },
+    #      { "stepNumber": 2, "taskType": "analysis",        "status": "completed", "output": "<country>" },
+    #      { "stepNumber": 3, "taskType": "reportGeneration","status": "completed", "output": { … } }
+    #    ] }
+    ```
+
+4. **Final results** — `finalResult` with all three tasks' outputs,
+   ordered by `stepNumber`:
+    ```bash
+    curl http://localhost:3000/workflow/<id>/results
+    # => { "workflowId": "<id>", "status": "completed",
+    #      "completedTasks": 3, "totalTasks": 3,
+    #      "tasks": [
+    #        { "stepNumber": 1, "taskType": "polygonArea",     "status": "completed", "output": <area> },
+    #        { "stepNumber": 2, "taskType": "analysis",        "status": "completed", "output": "<country>" },
+    #        { "stepNumber": 3, "taskType": "reportGeneration","status": "completed",
+    #          "output": { "workflowId": "<id>", "tasks": [<polygonArea>, <analysis>], "finalReport": "…" } }
+    #      ] }
+    ```
+
+The `reportGeneration` entry's `output.tasks` contains its two
+dependencies (`polygonArea`, `analysis`) — it aggregates its inputs,
+not itself.
+
+
 ### **Coding Challenge Tasks for the Interviewee**
 
 The following tasks must be completed to enhance the backend system:

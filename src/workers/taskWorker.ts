@@ -1,10 +1,13 @@
 import {AppDataSource} from '../data-source';
 import {Task} from '../models/Task';
 import {TaskRunner, TaskStatus} from './taskRunner';
+import {reconcileTasks} from './reconciliation';
 
 export async function taskWorker() {
     const taskRepository = AppDataSource.getRepository(Task);
     const taskRunner = new TaskRunner(taskRepository);
+
+    await reconcileTasks(AppDataSource);
 
     while (true) {
         const task = await taskRepository.findOne({
