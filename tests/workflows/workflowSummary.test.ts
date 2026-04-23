@@ -168,6 +168,62 @@ describe("workflowSummary", () => {
     expect(result.totalTasks).toBe(2);
   });
 
+  it("prefers task.error over task.progress for failed tasks when both are present", () => {
+    const workflow = {
+      workflowId: "wf-err",
+      status: "failed",
+      tasks: [
+        {
+          taskId: "t1",
+          stepNumber: 1,
+          taskType: "polygonArea",
+          status: "failed",
+          progress: "starting job...",
+          error: "Invalid GeoJSON: geometry.type must be Polygon",
+        },
+      ],
+    } as any;
+
+    const result = workflowSummary(workflow, { includeTasks: true });
+
+    expect(result.tasks).toEqual([
+      {
+        stepNumber: 1,
+        taskId: "t1",
+        taskType: "polygonArea",
+        status: "failed",
+        error: "Invalid GeoJSON: geometry.type must be Polygon",
+      },
+    ]);
+  });
+
+  it("falls back to task.progress for failed tasks when task.error is null/undefined", () => {
+    const workflow = {
+      workflowId: "wf-fb",
+      status: "failed",
+      tasks: [
+        {
+          taskId: "t1",
+          stepNumber: 1,
+          taskType: "polygonArea",
+          status: "failed",
+          progress: "legacy error string",
+          error: null,
+        },
+      ],
+    } as any;
+
+    const result = workflowSummary(workflow, { includeTasks: true });
+
+    expect(result.tasks?.[0]).toEqual({
+      stepNumber: 1,
+      taskId: "t1",
+      taskType: "polygonArea",
+      status: "failed",
+      error: "legacy error string",
+    });
+  });
+
   it("represents non-terminal tasks with their status and includes progress only when present", () => {
     const workflow = {
       workflowId: "wf-8",

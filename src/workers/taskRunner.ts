@@ -1,10 +1,11 @@
-import { In, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { Task } from '../models/Task';
 import { getJobForTaskType } from '../jobs/JobFactory';
 import {WorkflowStatus} from "../workflows/WorkflowFactory";
 import {Workflow} from "../models/Workflow";
 import {Result} from "../models/Result";
 import {JobContext, JobDependency} from "../jobs/Job";
+import {workflowSummary} from "../workflows/workflowSummary";
 
 export enum TaskStatus {
     Waiting = 'waiting',
@@ -72,6 +73,8 @@ export class TaskRunner {
                         }
                     }
                 }
+
+                await this.updateWorkflowStatus(tx, task.workflow.workflowId);
             });
 
         } catch (error: any) {
@@ -123,17 +126,16 @@ export class TaskRunner {
                         queue.push(candidate.stepNumber);
                     }
                 }
+
+                await this.updateWorkflowStatus(tx, task.workflow.workflowId);
             });
 
-            await this.updateWorkflowStatus(task.workflow.workflowId);
             throw error;
         }
-
-        await this.updateWorkflowStatus(task.workflow.workflowId);
     }
 
-    private async updateWorkflowStatus(workflowId: string): Promise<void> {
-        const workflowRepository = this.taskRepository.manager.getRepository(Workflow);
+    private async updateWorkflowStatus(tx: EntityManager, workflowId: string): Promise<void> {
+        const workflowRepository = tx.getRepository(Workflow);
         const currentWorkflow = await workflowRepository.findOne({ where: { workflowId }, relations: ['tasks'] });
 
         if (currentWorkflow) {
@@ -146,6 +148,15 @@ export class TaskRunner {
                 currentWorkflow.status = WorkflowStatus.Completed;
             } else {
                 currentWorkflow.status = WorkflowStatus.InProgress;
+            }
+
+            const isTerminal =
+                currentWorkflow.status === WorkflowStatus.Completed ||
+                currentWorkflow.status === WorkflowStatus.Failed;
+            if (isTerminal && !currentWorkflow.finalResult) {
+                currentWorkflow.finalResult = JSON.stringify(
+                    workflowSummary(currentWorkflow, { includeTasks: true }),
+                );
             }
 
             await workflowRepository.save(currentWorkflow);

@@ -9,6 +9,7 @@ export interface SummarisableTask {
   status: string;
   output?: string | null;
   progress?: string | null;
+  error?: string | null;
 }
 
 export interface SummarisableWorkflow {
@@ -75,7 +76,7 @@ function summariseTask(task: SummarisableTask): TaskSummary {
     return {
       ...base,
       status: "failed",
-      error: task.progress ?? "",
+      error: task.error ?? task.progress ?? "",
     };
   }
 
