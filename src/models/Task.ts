@@ -22,6 +22,9 @@ export class Task {
     @Column({ nullable: true, type: 'text' })
     output?: string | null;
 
+    @Column({ nullable: true, type: 'text' })
+    error?: string | null;
+
     @Column({ nullable: true })
     resultId?: string;
 

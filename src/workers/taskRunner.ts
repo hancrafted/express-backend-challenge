@@ -77,15 +77,64 @@ export class TaskRunner {
         } catch (error: any) {
             console.error(`Error running job ${task.taskType} for task ${task.taskId}:`, error);
 
-            task.status = TaskStatus.Failed;
-            task.progress = null;
-            await this.taskRepository.save(task);
+            await this.taskRepository.manager.transaction(async (tx) => {
+                const txTaskRepo = tx.getRepository(Task);
 
+                task.status = TaskStatus.Failed;
+                task.progress = null;
+                task.error = error?.message ?? String(error);
+                await txTaskRepo.save(task);
+
+                const allTasks = await txTaskRepo.find({
+                    where: { workflow: { workflowId: task.workflow.workflowId } },
+                    relations: ['workflow'],
+                });
+
+                const failedSteps = new Set<number>();
+                for (const t of allTasks) {
+                    if (t.status === TaskStatus.Failed) failedSteps.add(t.stepNumber);
+                }
+
+                const queue: number[] = [task.stepNumber];
+                const cascaded = new Set<number>();
+                while (queue.length > 0) {
+                    const parentStep = queue.shift()!;
+                    for (const candidate of allTasks) {
+                        if (candidate.stepNumber === parentStep) continue;
+                        if (cascaded.has(candidate.stepNumber)) continue;
+                        if (candidate.taskId === task.taskId) continue;
+                        if (candidate.status === TaskStatus.Completed || candidate.status === TaskStatus.Failed) continue;
+                        const deps: number[] = candidate.dependency
+                            ? JSON.parse(candidate.dependency)
+                            : [];
+                        if (!deps.includes(parentStep)) continue;
+
+                        const failedDepSteps = deps
+                            .filter(d => failedSteps.has(d) || d === task.stepNumber || cascaded.has(d))
+                            .sort((a, b) => a - b);
+                        const reasonStep = failedDepSteps[0] ?? parentStep;
+
+                        candidate.status = TaskStatus.Failed;
+                        candidate.progress = null;
+                        candidate.error = `Skipped: dependency ${reasonStep} failed`;
+                        await txTaskRepo.save(candidate);
+
+                        cascaded.add(candidate.stepNumber);
+                        queue.push(candidate.stepNumber);
+                    }
+                }
+            });
+
+            await this.updateWorkflowStatus(task.workflow.workflowId);
             throw error;
         }
 
+        await this.updateWorkflowStatus(task.workflow.workflowId);
+    }
+
+    private async updateWorkflowStatus(workflowId: string): Promise<void> {
         const workflowRepository = this.taskRepository.manager.getRepository(Workflow);
-        const currentWorkflow = await workflowRepository.findOne({ where: { workflowId: task.workflow.workflowId }, relations: ['tasks'] });
+        const currentWorkflow = await workflowRepository.findOne({ where: { workflowId }, relations: ['tasks'] });
 
         if (currentWorkflow) {
             const allCompleted = currentWorkflow.tasks.every(t => t.status === TaskStatus.Completed);
