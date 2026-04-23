@@ -40,6 +40,7 @@ export class TaskRunner {
             task.resultId = result.resultId!;
             task.status = TaskStatus.Completed;
             task.progress = null;
+            task.output = JSON.stringify(taskResult ?? null);
             await this.taskRepository.save(task);
 
         } catch (error: any) {
