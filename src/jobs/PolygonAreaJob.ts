@@ -1,9 +1,9 @@
 import area from '@turf/area';
-import { Job } from './Job';
+import { Job, JobContext } from './Job';
 import { Task } from '../models/Task';
 
 export class PolygonAreaJob implements Job {
-    async run(task: Task): Promise<number> {
+    async run(task: Task, _context?: JobContext): Promise<number> {
         let parsed: any;
         try {
             parsed = JSON.parse(task.geoJson);

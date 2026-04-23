@@ -6,6 +6,7 @@ import {Workflow} from "../models/Workflow";
 import {Result} from "../models/Result";
 
 export enum TaskStatus {
+    Waiting = 'waiting',
     Queued = 'queued',
     InProgress = 'in_progress',
     Completed = 'completed',
@@ -30,18 +31,45 @@ export class TaskRunner {
 
         try {
             console.log(`Starting job ${task.taskType} for task ${task.taskId}...`);
-            const resultRepository = this.taskRepository.manager.getRepository(Result);
             const taskResult = await job.run(task);
             console.log(`Job ${task.taskType} for task ${task.taskId} completed successfully.`);
-            const result = new Result();
-            result.taskId = task.taskId!;
-            result.data = JSON.stringify(taskResult || {});
-            await resultRepository.save(result);
-            task.resultId = result.resultId!;
-            task.status = TaskStatus.Completed;
-            task.progress = null;
-            task.output = JSON.stringify(taskResult ?? null);
-            await this.taskRepository.save(task);
+
+            await this.taskRepository.manager.transaction(async (tx) => {
+                const txTaskRepo = tx.getRepository(Task);
+                const txResultRepo = tx.getRepository(Result);
+
+                const result = new Result();
+                result.taskId = task.taskId!;
+                result.data = JSON.stringify(taskResult || {});
+                await txResultRepo.save(result);
+                task.resultId = result.resultId!;
+                task.status = TaskStatus.Completed;
+                task.progress = null;
+                task.output = JSON.stringify(taskResult ?? null);
+                await txTaskRepo.save(task);
+
+                const siblings = await txTaskRepo.find({
+                    where: { workflow: { workflowId: task.workflow.workflowId }, status: TaskStatus.Waiting },
+                    relations: ['workflow'],
+                });
+                if (siblings.length > 0) {
+                    const completedSteps = new Set<number>();
+                    const allTasks = await txTaskRepo.find({
+                        where: { workflow: { workflowId: task.workflow.workflowId } },
+                        relations: ['workflow'],
+                    });
+                    for (const t of allTasks) {
+                        if (t.status === TaskStatus.Completed) completedSteps.add(t.stepNumber);
+                    }
+                    for (const sibling of siblings) {
+                        const deps: number[] = sibling.dependency ? JSON.parse(sibling.dependency) : [];
+                        if (deps.length > 0 && deps.every(d => completedSteps.has(d))) {
+                            sibling.status = TaskStatus.Queued;
+                            await txTaskRepo.save(sibling);
+                        }
+                    }
+                }
+            });
 
         } catch (error: any) {
             console.error(`Error running job ${task.taskType} for task ${task.taskId}:`, error);
