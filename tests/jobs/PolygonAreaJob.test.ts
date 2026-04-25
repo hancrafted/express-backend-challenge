@@ -1,3 +1,4 @@
+/** Covers TESTING_PRD stories: existing happy paths + 12, 13. Prior art: same file. */
 import { describe, it, expect } from "vitest";
 import { PolygonAreaJob } from "../../src/jobs/PolygonAreaJob";
 import { Task } from "../../src/models/Task";
@@ -124,5 +125,135 @@ describe("PolygonAreaJob", () => {
     // Roughly ~1.34 km x ~6.3 km rectangular box ≈ 8.4e6 m²
     expect(result).toBeGreaterThan(8_000_000);
     expect(result).toBeLessThan(9_000_000);
+  });
+});
+
+
+describe("[stories 12, 13] invalid-input rejection", () => {
+  it("[story 12] rejects a Polygon ring with fewer than four coordinates", async () => {
+    const job = new PolygonAreaJob();
+    const polygon = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [0, 0],
+          [1, 1],
+          [0, 0],
+        ],
+      ],
+    };
+
+    await expect(job.run(makeTask(polygon))).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 12] rejects a Polygon with an explicitly unclosed ring", async () => {
+    const job = new PolygonAreaJob();
+    const polygon = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [0, 0],
+          [0, 1],
+          [1, 1],
+          [1, 0],
+        ],
+      ],
+    };
+
+    await expect(job.run(makeTask(polygon))).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 12] rejects a Feature<Polygon> with an unclosed ring", async () => {
+    const job = new PolygonAreaJob();
+    const feature = {
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          [
+            [0, 0],
+            [0, 1],
+            [1, 1],
+            [1, 0],
+          ],
+        ],
+      },
+    };
+
+    await expect(job.run(makeTask(feature))).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 12] rejects a MultiPolygon when any inner ring is unclosed", async () => {
+    const job = new PolygonAreaJob();
+    const multi = {
+      type: "MultiPolygon",
+      coordinates: [
+        [
+          [
+            [0, 0],
+            [0, 1],
+            [1, 1],
+            [1, 0],
+            [0, 0],
+          ],
+        ],
+        [
+          [
+            [10, 10],
+            [10, 11],
+            [11, 11],
+            [11, 10],
+          ],
+        ],
+      ],
+    };
+
+    await expect(job.run(makeTask(multi))).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 12] rejects an empty task.geoJson string", async () => {
+    const job = new PolygonAreaJob();
+    const task = makeTask("");
+
+    await expect(job.run(task)).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 12] rejects a null task.geoJson value", async () => {
+    const job = new PolygonAreaJob();
+    const task = new Task();
+    task.geoJson = null as unknown as string;
+    task.taskType = "polygonArea";
+
+    await expect(job.run(task)).rejects.toThrow(/invalid geojson/i);
+  });
+
+  it("[story 13] rejects a syntactically valid GeoJSON FeatureCollection", async () => {
+    const job = new PolygonAreaJob();
+    const featureCollection = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Polygon",
+            coordinates: [
+              [
+                [0, 0],
+                [0, 1],
+                [1, 1],
+                [1, 0],
+                [0, 0],
+              ],
+            ],
+          },
+        },
+      ],
+    };
+
+    await expect(job.run(makeTask(featureCollection))).rejects.toThrow(
+      /polygon|multipolygon/i,
+    );
   });
 });
