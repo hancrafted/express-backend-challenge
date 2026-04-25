@@ -1,3 +1,11 @@
+/**
+ * Unit tests for the pure `workflowSummary` projection.
+ *
+ * Covers:
+ *   - core shape + counts (existing cases)
+ *   - story 28: mid-flight workflow with all 5 task statuses present
+ *   - story 34: 100-task scale workflow with mixed statuses (no truncation)
+ */
 import { describe, it, expect } from "vitest";
 import { workflowSummary } from "../../src/workflows/workflowSummary";
 
@@ -271,3 +279,102 @@ describe("workflowSummary", () => {
     });
   });
 });
+
+describe("[stories 28, 34] mid-flight + scale", () => {
+  it("[story 28] summarises a workflow with one task in each of the 5 statuses (mid-flight shape stable, ordered by stepNumber)", () => {
+    // Insertion order intentionally scrambled to verify ordering by stepNumber.
+    const workflow = {
+      workflowId: "wf-mid-flight",
+      status: "in_progress",
+      tasks: [
+        { taskId: "t-q", stepNumber: 2, taskType: "polygonArea", status: "queued" },
+        { taskId: "t-c", stepNumber: 4, taskType: "polygonArea", status: "completed", output: JSON.stringify(123) },
+        { taskId: "t-w", stepNumber: 1, taskType: "polygonArea", status: "waiting" },
+        { taskId: "t-f", stepNumber: 5, taskType: "polygonArea", status: "failed", error: "boom" },
+        { taskId: "t-p", stepNumber: 3, taskType: "polygonArea", status: "in_progress", progress: "halfway" },
+      ],
+    } as any;
+
+    const result = workflowSummary(workflow, { includeTasks: true });
+
+    // Shape stability: exact top-level keys, no extras.
+    expect(Object.keys(result).sort()).toEqual(
+      ["completedTasks", "status", "tasks", "totalTasks", "workflowId"],
+    );
+    expect(result.workflowId).toBe("wf-mid-flight");
+    expect(result.status).toBe("in_progress");
+    expect(result.completedTasks).toBe(1);
+    expect(result.totalTasks).toBe(5);
+
+    // tasks[] must be ordered by stepNumber regardless of input order.
+    expect(result.tasks?.map(t => t.stepNumber)).toEqual([1, 2, 3, 4, 5]);
+    expect(result.tasks?.map(t => t.taskId)).toEqual(["t-w", "t-q", "t-p", "t-c", "t-f"]);
+    expect(result.tasks?.map(t => t.status)).toEqual([
+      "waiting",
+      "queued",
+      "in_progress",
+      "completed",
+      "failed",
+    ]);
+  });
+
+  it("[story 34] summarises a 100-task workflow without truncation; completedTasks matches a manual reduce over the seed", () => {
+    // Deterministic seed: ~half completed, the rest split across failed/queued/waiting/in_progress.
+    const seed = Array.from({ length: 100 }, (_, i) => {
+      const stepNumber = i + 1;
+      const mod = i % 5;
+      if (mod === 0 || mod === 1 || mod === 2) {
+        // 60 completed (indexes 0,1,2,5,6,7,...)
+        return {
+          taskId: `t-${stepNumber}`,
+          stepNumber,
+          taskType: "polygonArea",
+          status: "completed",
+          output: JSON.stringify({ step: stepNumber }),
+        };
+      }
+      if (mod === 3) {
+        return {
+          taskId: `t-${stepNumber}`,
+          stepNumber,
+          taskType: "polygonArea",
+          status: "failed",
+          error: `failure-${stepNumber}`,
+        };
+      }
+      // mod === 4 → cycle through the three non-terminal statuses
+      const cycle = ["queued", "waiting", "in_progress"][stepNumber % 3];
+      return {
+        taskId: `t-${stepNumber}`,
+        stepNumber,
+        taskType: "polygonArea",
+        status: cycle,
+      };
+    });
+
+    // Shuffle insertion order so the projection has to re-sort.
+    const shuffled = [...seed].reverse();
+    const workflow = {
+      workflowId: "wf-scale-100",
+      status: "in_progress",
+      tasks: shuffled,
+    } as any;
+
+    const expectedCompleted = seed.reduce(
+      (acc, t) => acc + (t.status === "completed" ? 1 : 0),
+      0,
+    );
+
+    const result = workflowSummary(workflow, { includeTasks: true });
+
+    expect(result.totalTasks).toBe(100);
+    expect(result.completedTasks).toBe(expectedCompleted);
+    expect(result.tasks).toBeDefined();
+    expect(result.tasks?.length).toBe(100); // no truncation
+
+    // tasks[] strictly ordered by stepNumber 1..100.
+    const stepNumbers = result.tasks?.map(t => t.stepNumber) ?? [];
+    expect(stepNumbers).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
+  });
+});
+
