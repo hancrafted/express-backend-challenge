@@ -1,3 +1,18 @@
+/**
+ * Fail-fast cascade behavior of TaskRunner.
+ *
+ * Stories pinned in this file:
+ *  - story 23: wide fan-out — a single parent failure cascades to all of its
+ *              waiting dependents (regardless of count) with the per-dependent
+ *              skip-reason referencing the failed parent's stepNumber.
+ *  - story 24: wide fan-in — when one of N parents fails, the shared child is
+ *              cascaded exactly once with a skip reason referencing only the
+ *              failed parent (no double-failure side effects).
+ *  - story 25: two independent failure origins — when two unrelated parents
+ *              both fail, a shared descendant is cascaded only once and its
+ *              skip reason references the lowest-stepNumber failed dependency
+ *              (per TaskRunner's failedDepSteps.sort((a,b)=>a-b)[0] rule).
+ */
 import "reflect-metadata";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { DataSource } from "typeorm";
@@ -188,5 +203,106 @@ describe("TaskRunner fail-fast cascade on task failure", () => {
     const bAfter = await taskRepo.findOneByOrFail({ taskId: b.taskId });
     expect(bAfter.status).toBe(TaskStatus.Failed);
     expect(bAfter.error).toBe("Skipped: dependency 1 failed");
+  });
+
+  describe("[stories 23, 24, 25] graph-shape cascade", () => {
+    it("[story 23] wide fan-out: 1 parent failure cascades to all 10 waiting dependents with skip reason", async () => {
+      const workflow = await seedWorkflow();
+      const taskRepo = dataSource.getRepository(Task);
+
+      const parent = makeTask(workflow, 1, TaskStatus.Queued, null, "polygonArea", invalidGeoJson);
+      const dependents: Task[] = [];
+      for (let i = 0; i < 10; i++) {
+        dependents.push(makeTask(workflow, 2 + i, TaskStatus.Waiting, [1], "polygonArea"));
+      }
+      await taskRepo.save([parent, ...dependents]);
+
+      const runner = new TaskRunner(taskRepo);
+      await expect(runner.run(parent)).rejects.toThrow();
+
+      const parentAfter = await taskRepo.findOneByOrFail({ taskId: parent.taskId });
+      expect(parentAfter.status).toBe(TaskStatus.Failed);
+      expect(parentAfter.error).toBeTruthy();
+
+      for (const d of dependents) {
+        const after = await taskRepo.findOneByOrFail({ taskId: d.taskId });
+        expect(after.status).toBe(TaskStatus.Failed);
+        expect(after.progress).toBeNull();
+        expect(after.error).toBe("Skipped: dependency 1 failed");
+      }
+    });
+
+    it("[story 24] wide fan-in: only the step-5 failure cascades to the shared child, exactly once, referencing step 5", async () => {
+      const workflow = await seedWorkflow();
+      const taskRepo = dataSource.getRepository(Task);
+
+      const p1 = makeTask(workflow, 1, TaskStatus.Queued, null, "polygonArea", validGeoJson);
+      const p2 = makeTask(workflow, 2, TaskStatus.Queued, null, "polygonArea", validGeoJson);
+      const p3 = makeTask(workflow, 3, TaskStatus.Queued, null, "polygonArea", validGeoJson);
+      const p4 = makeTask(workflow, 4, TaskStatus.Queued, null, "polygonArea", validGeoJson);
+      const p5 = makeTask(workflow, 5, TaskStatus.Queued, null, "polygonArea", invalidGeoJson);
+      const child = makeTask(workflow, 6, TaskStatus.Waiting, [1, 2, 3, 4, 5], "notification");
+      await taskRepo.save([p1, p2, p3, p4, p5, child]);
+
+      const runner = new TaskRunner(taskRepo);
+      await runner.run(p1);
+      await runner.run(p2);
+      await runner.run(p3);
+      await runner.run(p4);
+
+      const childMid = await taskRepo.findOneByOrFail({ taskId: child.taskId });
+      expect(childMid.status).toBe(TaskStatus.Waiting);
+
+      const txSpy = vi.spyOn(taskRepo.manager, "transaction");
+      const p5Reload = await taskRepo.findOneOrFail({
+        where: { taskId: p5.taskId },
+        relations: ["workflow"],
+      });
+      await expect(runner.run(p5Reload)).rejects.toThrow();
+
+      // Failure path opens exactly one cascade transaction (no double-failure side effects).
+      expect(txSpy).toHaveBeenCalledTimes(1);
+
+      const p5After = await taskRepo.findOneByOrFail({ taskId: p5.taskId });
+      expect(p5After.status).toBe(TaskStatus.Failed);
+
+      const childAfter = await taskRepo.findOneByOrFail({ taskId: child.taskId });
+      expect(childAfter.status).toBe(TaskStatus.Failed);
+      expect(childAfter.progress).toBeNull();
+      expect(childAfter.error).toBe("Skipped: dependency 5 failed");
+    });
+
+    it("[story 25] two failure origins: descendant cascades once with reason referencing the lowest-stepNumber failed dependency", async () => {
+      const workflow = await seedWorkflow();
+      const taskRepo = dataSource.getRepository(Task);
+
+      const p1 = makeTask(workflow, 1, TaskStatus.Queued, null, "polygonArea", invalidGeoJson);
+      const p2 = makeTask(workflow, 2, TaskStatus.Queued, null, "polygonArea", invalidGeoJson);
+      const desc = makeTask(workflow, 3, TaskStatus.Waiting, [1, 2], "notification");
+      await taskRepo.save([p1, p2, desc]);
+
+      const runner = new TaskRunner(taskRepo);
+
+      await expect(runner.run(p1)).rejects.toThrow();
+
+      const descAfterP1 = await taskRepo.findOneByOrFail({ taskId: desc.taskId });
+      expect(descAfterP1.status).toBe(TaskStatus.Failed);
+      expect(descAfterP1.error).toBe("Skipped: dependency 1 failed");
+
+      const p2Reload = await taskRepo.findOneOrFail({
+        where: { taskId: p2.taskId },
+        relations: ["workflow"],
+      });
+      await expect(runner.run(p2Reload)).rejects.toThrow();
+
+      const p2After = await taskRepo.findOneByOrFail({ taskId: p2.taskId });
+      expect(p2After.status).toBe(TaskStatus.Failed);
+
+      // Descendant remains Failed with the original (lowest-step) reason; the
+      // step-2 failure does not re-cascade or overwrite the existing reason.
+      const descAfterP2 = await taskRepo.findOneByOrFail({ taskId: desc.taskId });
+      expect(descAfterP2.status).toBe(TaskStatus.Failed);
+      expect(descAfterP2.error).toBe("Skipped: dependency 1 failed");
+    });
   });
 });
