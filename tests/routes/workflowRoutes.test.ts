@@ -1,3 +1,13 @@
+/**
+ * Route tests for `createWorkflowRouter` (`/workflow/:id/status`,
+ * `/workflow/:id/results`).
+ *
+ * Stories covered in the trailing block:
+ *   - [story 19] terminal workflow with finalResult=null → 500
+ *   - [story 20] strict `?includeTasks` matching (only literal "true")
+ *   - [story 21] zero-task workflow `/status`
+ *   - [story 35] 100-task workflow `/status?includeTasks=true`
+ */
 import "reflect-metadata";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import express from "express";
@@ -9,6 +19,9 @@ import { Workflow } from "../../src/models/Workflow";
 import { TaskStatus } from "../../src/workers/taskRunner";
 import { WorkflowStatus } from "../../src/workflows/WorkflowFactory";
 import { createWorkflowRouter } from "../../src/routes/workflowRoutes";
+import { makeDataSource } from "../_support/makeDataSource";
+import { seedWorkflow as seedWorkflowSupport } from "../_support/seedWorkflow";
+import { makeTask as makeTaskSupport } from "../_support/makeTask";
 
 describe("GET /workflow/:id/status and /workflow/:id/results", () => {
   let dataSource: DataSource;
@@ -181,5 +194,149 @@ describe("GET /workflow/:id/status and /workflow/:id/results", () => {
       const res = await request(app).get(`/workflow/unknownid/results`);
       expect(res.status).toBe(404);
     });
+  });
+});
+
+describe("[stories 19, 20, 21, 35] route edge + scale", () => {
+  let dataSource: DataSource;
+  let app: express.Express;
+
+  beforeEach(async () => {
+    dataSource = await makeDataSource();
+    app = express();
+    app.use(express.json());
+    app.use("/workflow", createWorkflowRouter(dataSource));
+  });
+
+  afterEach(async () => {
+    if (dataSource?.isInitialized) {
+      await dataSource.destroy();
+    }
+  });
+
+  it("[story 19] returns 500 when terminal workflow has finalResult=null", async () => {
+    const workflow = await seedWorkflowSupport(dataSource, {
+      status: WorkflowStatus.Completed,
+    });
+    // finalResult left as null/undefined intentionally.
+
+    const res = await request(app).get(`/workflow/${workflow.workflowId}/results`);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toHaveProperty("message");
+  });
+
+  describe("[story 20] strict ?includeTasks matching", () => {
+    async function seedWithOneTask(): Promise<Workflow> {
+      const workflow = await seedWorkflowSupport(dataSource, {
+        status: WorkflowStatus.InProgress,
+      });
+      const taskRepo = dataSource.getRepository(Task);
+      await taskRepo.save([
+        makeTaskSupport(workflow, 1, TaskStatus.Completed, {
+          output: JSON.stringify({ area: 1 }),
+        }),
+      ]);
+      return workflow;
+    }
+
+    it('[story 20] "true" → tasks[] present', async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app)
+        .get(`/workflow/${workflow.workflowId}/status`)
+        .query({ includeTasks: "true" });
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.tasks)).toBe(true);
+      expect(res.body.tasks).toHaveLength(1);
+    });
+
+    it('[story 20] "1" → tasks[] absent (undefined)', async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app)
+        .get(`/workflow/${workflow.workflowId}/status`)
+        .query({ includeTasks: "1" });
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toBeUndefined();
+    });
+
+    it('[story 20] "TRUE" → tasks[] absent (undefined)', async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app)
+        .get(`/workflow/${workflow.workflowId}/status`)
+        .query({ includeTasks: "TRUE" });
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toBeUndefined();
+    });
+
+    it('[story 20] "" → tasks[] absent (undefined)', async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app)
+        .get(`/workflow/${workflow.workflowId}/status`)
+        .query({ includeTasks: "" });
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toBeUndefined();
+    });
+
+    it("[story 20] omitted → tasks[] absent (undefined)", async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app).get(
+        `/workflow/${workflow.workflowId}/status`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toBeUndefined();
+    });
+
+    it("[story 20] array (?includeTasks=true&includeTasks=false) → tasks[] absent (undefined)", async () => {
+      const workflow = await seedWithOneTask();
+      const res = await request(app).get(
+        `/workflow/${workflow.workflowId}/status?includeTasks=true&includeTasks=false`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.tasks).toBeUndefined();
+    });
+  });
+
+  it("[story 21] zero-task workflow → /status returns 200 with totalTasks=0, completedTasks=0", async () => {
+    const workflow = await seedWorkflowSupport(dataSource, {
+      status: WorkflowStatus.Initial,
+    });
+
+    const res = await request(app).get(`/workflow/${workflow.workflowId}/status`);
+    expect(res.status).toBe(200);
+    expect(res.body.completedTasks).toBe(0);
+    expect(res.body.totalTasks).toBe(0);
+    expect(res.body.tasks).toBeUndefined();
+
+    const resWithTasks = await request(app)
+      .get(`/workflow/${workflow.workflowId}/status`)
+      .query({ includeTasks: "true" });
+    expect(resWithTasks.status).toBe(200);
+    expect(Array.isArray(resWithTasks.body.tasks)).toBe(true);
+    expect(resWithTasks.body.tasks).toHaveLength(0);
+  });
+
+  it("[story 35] 100-task workflow → /status?includeTasks=true returns all 100 ordered by stepNumber", async () => {
+    const workflow = await seedWorkflowSupport(dataSource, {
+      status: WorkflowStatus.InProgress,
+    });
+    const taskRepo = dataSource.getRepository(Task);
+
+    const stepNumbers = Array.from({ length: 100 }, (_, i) => i + 1);
+    // Insert in shuffled-ish order so we can verify sort.
+    const shuffled = [...stepNumbers].sort(() => 0.5 - Math.random());
+    const tasks = shuffled.map(n =>
+      makeTaskSupport(workflow, n, TaskStatus.Queued),
+    );
+    await taskRepo.save(tasks);
+
+    const res = await request(app)
+      .get(`/workflow/${workflow.workflowId}/status`)
+      .query({ includeTasks: "true" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalTasks).toBe(100);
+    expect(Array.isArray(res.body.tasks)).toBe(true);
+    expect(res.body.tasks).toHaveLength(100);
+    expect(res.body.tasks.map((t: any) => t.stepNumber)).toEqual(stepNumbers);
   });
 });
