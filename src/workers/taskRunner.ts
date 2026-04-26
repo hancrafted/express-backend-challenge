@@ -31,9 +31,8 @@ export class TaskRunner {
         await this.taskRepository.save(task);
         const job = getJobForTaskType(task.taskType);
 
-        const context = await this.buildJobContext(task);
-
         try {
+            const context = await this.buildJobContext(task);
             console.log(`Starting job ${task.taskType} for task ${task.taskId}...`);
             const taskResult = await job.run(task, context);
             console.log(`Job ${task.taskType} for task ${task.taskId} completed successfully.`);
@@ -170,8 +169,8 @@ export class TaskRunner {
         let deps: number[];
         try {
             deps = JSON.parse(task.dependency);
-        } catch {
-            return undefined;
+        } catch (err: any) {
+            throw new Error(`Invalid Task.dependency JSON: ${err?.message ?? err}`);
         }
         if (!Array.isArray(deps) || deps.length === 0) {
             return undefined;

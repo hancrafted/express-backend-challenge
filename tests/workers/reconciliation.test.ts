@@ -1,3 +1,20 @@
+/**
+ * Reconciliation startup-sweep coverage.
+ *
+ * Stories pinned in this file:
+ *  - existing: stranded InProgress reset to Queued; single-parent Waiting
+ *              promotion; mixed/Failed parents leave child Waiting.
+ *  - story 26: chain A(Completed)→B(Waiting)→C(Waiting) — single sweep
+ *              promotes B only; C stays Waiting (LOCK: single-pass
+ *              one-level promotion — see TESTING_PRD Q6).
+ *  - story 27: combined sweep — stranded InProgress parent X is reset to
+ *              Queued and Waiting child Y stays Waiting (parent is no
+ *              longer Completed at promotion time); reconcileTasks returns
+ *              { reset: 1, promoted: 0 }.
+ *
+ * NOTE: stories 26/27 are LOCK tests. A future fixed-point reconciliation
+ * refactor SHOULD break them, prompting an intentional update.
+ */
 import "reflect-metadata";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { DataSource } from "typeorm";
@@ -7,6 +24,9 @@ import { Workflow } from "../../src/models/Workflow";
 import { TaskStatus } from "../../src/workers/taskRunner";
 import { WorkflowStatus } from "../../src/workflows/WorkflowFactory";
 import { reconcileTasks } from "../../src/workers/reconciliation";
+import { makeDataSource } from "../_support/makeDataSource";
+import { seedWorkflow as seedWorkflowSupport } from "../_support/seedWorkflow";
+import { makeTask as makeTaskSupport } from "../_support/makeTask";
 
 describe("reconcileTasks startup sweep", () => {
   let dataSource: DataSource;
@@ -167,5 +187,59 @@ describe("reconcileTasks startup sweep", () => {
     expect(s2.progress ?? null).toBeNull();
     const promotableAfter = await taskRepo.findOneByOrFail({ taskId: promotable.taskId });
     expect(promotableAfter.status).toBe(TaskStatus.Queued);
+  });
+});
+
+describe("[stories 26, 27] sweep semantics", () => {
+  let dataSource: DataSource;
+
+  beforeEach(async () => {
+    dataSource = await makeDataSource();
+  });
+
+  afterEach(async () => {
+    if (dataSource?.isInitialized) {
+      await dataSource.destroy();
+    }
+  });
+
+  it("[story 26] chain A(Completed)→B(Waiting)→C(Waiting): single sweep promotes only B; C stays Waiting", async () => {
+    // LOCK: single-pass one-level promotion — see TESTING_PRD Q6
+    const workflow = await seedWorkflowSupport(dataSource);
+    const taskRepo = dataSource.getRepository(Task);
+    const a = makeTaskSupport(workflow, 1, TaskStatus.Completed, { dependency: null });
+    const b = makeTaskSupport(workflow, 2, TaskStatus.Waiting, { dependency: [1] });
+    const c = makeTaskSupport(workflow, 3, TaskStatus.Waiting, { dependency: [2] });
+    await taskRepo.save([a, b, c]);
+
+    const result = await reconcileTasks(dataSource);
+
+    expect(result).toEqual({ reset: 0, promoted: 1 });
+    const aAfter = await taskRepo.findOneByOrFail({ taskId: a.taskId });
+    const bAfter = await taskRepo.findOneByOrFail({ taskId: b.taskId });
+    const cAfter = await taskRepo.findOneByOrFail({ taskId: c.taskId });
+    expect(aAfter.status).toBe(TaskStatus.Completed);
+    expect(bAfter.status).toBe(TaskStatus.Queued);
+    expect(cAfter.status).toBe(TaskStatus.Waiting);
+  });
+
+  it("[story 27] combined sweep: stranded InProgress parent is reset to Queued and Waiting child stays Waiting", async () => {
+    const workflow = await seedWorkflowSupport(dataSource);
+    const taskRepo = dataSource.getRepository(Task);
+    const x = makeTaskSupport(workflow, 1, TaskStatus.InProgress, {
+      dependency: null,
+      overrides: { progress: "interrupted" },
+    });
+    const y = makeTaskSupport(workflow, 2, TaskStatus.Waiting, { dependency: [1] });
+    await taskRepo.save([x, y]);
+
+    const result = await reconcileTasks(dataSource);
+
+    expect(result).toEqual({ reset: 1, promoted: 0 });
+    const xAfter = await taskRepo.findOneByOrFail({ taskId: x.taskId });
+    const yAfter = await taskRepo.findOneByOrFail({ taskId: y.taskId });
+    expect(xAfter.status).toBe(TaskStatus.Queued);
+    expect(xAfter.progress ?? null).toBeNull();
+    expect(yAfter.status).toBe(TaskStatus.Waiting);
   });
 });

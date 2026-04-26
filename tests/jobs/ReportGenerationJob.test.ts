@@ -1,3 +1,4 @@
+/** Covers TESTING_PRD stories: existing happy paths + 14. Prior art: same file. */
 import { describe, it, expect } from "vitest";
 import { ReportGenerationJob } from "../../src/jobs/ReportGenerationJob";
 import { Task } from "../../src/models/Task";
@@ -82,5 +83,34 @@ describe("ReportGenerationJob", () => {
       output: null,
     });
     expect(result.tasks[0].output).toBeNull();
+  });
+});
+
+describe("[story 14] misconfigured invocation", () => {
+  it("[story 14] returns deterministic empty-report shape when invoked with undefined context", async () => {
+    const job = new ReportGenerationJob();
+    const task = makeReportTask("wf-undef-ctx");
+
+    const result = await job.run(task, undefined);
+
+    expect(result).toEqual({
+      workflowId: "wf-undef-ctx",
+      tasks: [],
+      finalReport: "Aggregated 0 tasks",
+    });
+  });
+
+  it("[story 14] returns deterministic empty-report shape when dependencyOutputs is empty and dependencies omitted", async () => {
+    const job = new ReportGenerationJob();
+    const task = makeReportTask("wf-empty-deps");
+    const context: JobContext = { dependencyOutputs: {} };
+
+    const result = await job.run(task, context);
+
+    expect(result).toEqual({
+      workflowId: "wf-empty-deps",
+      tasks: [],
+      finalReport: "Aggregated 0 tasks",
+    });
   });
 });

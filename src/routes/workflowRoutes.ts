@@ -46,7 +46,14 @@ export function createWorkflowRouter(dataSource: DataSource): Router {
             return;
         }
 
-        const parsed = JSON.parse(workflow.finalResult ?? 'null');
+        if (workflow.finalResult == null) {
+            res.status(500).json({
+                message: `Workflow ${req.params.id} is terminal but has no finalResult`,
+            });
+            return;
+        }
+
+        const parsed = JSON.parse(workflow.finalResult);
         res.status(200).json(parsed);
     });
 
