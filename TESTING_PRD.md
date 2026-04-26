@@ -6,7 +6,7 @@
 > against the codebase rather than the user — every coverage question
 > answerable by reading `tests/` and `src/` was resolved that way.
 > The output is therefore a gap-driven PRD: which behaviours required
-> by `PRD.md` and `Readme.md` are demonstrably exercised, which are
+> by `PRD.md` and `README.md` are demonstrably exercised, which are
 > not, and what needs adding to close the difference.
 
 ## Problem Statement
@@ -478,7 +478,7 @@ suite stays under the existing CI budget.
   that *adds* it will see the test break and have to be
   intentional about it. This is a load-bearing pattern for
   the "Production Considerations Considered, Deferred" list
-  in `Readme.md`.
+  in `README.md`.
 - **The `reconciliation` chain story (26)** is intentionally
   written so that whichever sweep strategy ships — single-pass
   one-level vs. fixed-point — is locked in by the test. The

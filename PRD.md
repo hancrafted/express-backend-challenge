@@ -1,6 +1,6 @@
 # PRD — Backend Coding Challenge: Workflow Engine Enhancements
 
-> Synthesised from the six todos in `Readme.md` (§ "Coding Challenge Tasks
+> Synthesised from the six todos in `README.md` (§ "Coding Challenge Tasks
 > for the Interviewee") and the design decisions resolved in the Grill-Me
 > interview session. Production-grade extensions noted but explicitly
 > out of scope; see Readme § Design Notes.
